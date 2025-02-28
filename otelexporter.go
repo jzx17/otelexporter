@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -16,19 +17,44 @@ import (
 	"go.uber.org/zap"
 )
 
+// Config holds the configuration for the OpenTelemetry exporter.
+type Config struct {
+	ServiceName        string
+	ServiceVersion     string
+	Environment        string
+	TraceSamplingRatio float64
+	Timeout            time.Duration
+}
+
+// DefaultConfig returns a default configuration.
+func DefaultConfig() Config {
+	return Config{
+		ServiceName:        "default-service",
+		ServiceVersion:     "1.0.0",
+		Environment:        "production",
+		TraceSamplingRatio: 1.0, // 100% sampling rate
+		Timeout:            5 * time.Second,
+	}
+}
+
+// Logger interface abstracts logging operations.
 type Logger interface {
 	Info(msg string, fields ...zap.Field)
 	Error(msg string, fields ...zap.Field)
 	Debug(msg string, fields ...zap.Field)
+	Warn(msg string, fields ...zap.Field)
 	Sync() error
 }
 
+// Exporter provides OpenTelemetry instrumentation capabilities.
 type Exporter struct {
+	config         Config
 	logger         Logger
 	tracerProvider *tracesdk.TracerProvider
 	meterProvider  *metricsdk.MeterProvider
 }
 
+// Option defines a function that configures the Exporter.
 type Option func(*Exporter)
 
 // WithLogger sets the logger for the Exporter.
@@ -38,20 +64,33 @@ func WithLogger(l Logger) Option {
 	}
 }
 
+// WithTracerProvider sets a custom TracerProvider.
 func WithTracerProvider(tp *tracesdk.TracerProvider) Option {
 	return func(e *Exporter) {
 		e.tracerProvider = tp
 	}
 }
 
+// WithMeterProvider sets a custom MeterProvider.
 func WithMeterProvider(mp *metricsdk.MeterProvider) Option {
 	return func(e *Exporter) {
 		e.meterProvider = mp
 	}
 }
 
-func NewExporter(opts ...Option) *Exporter {
-	e := &Exporter{}
+// WithConfig sets the configuration for the Exporter.
+func WithConfig(cfg Config) Option {
+	return func(e *Exporter) {
+		e.config = cfg
+	}
+}
+
+// NewExporter creates a new OpenTelemetry exporter with the given options.
+func NewExporter(opts ...Option) (*Exporter, error) {
+	e := &Exporter{
+		config: DefaultConfig(),
+	}
+
 	for _, opt := range opts {
 		opt(e)
 	}
@@ -60,7 +99,7 @@ func NewExporter(opts ...Option) *Exporter {
 	if e.logger == nil {
 		logger, err := zap.NewProduction()
 		if err != nil {
-			panic(fmt.Sprintf("failed to initialize default logger: %v", err))
+			return nil, fmt.Errorf("failed to initialize default logger: %w", err)
 		}
 		e.logger = logger
 	}
@@ -70,9 +109,9 @@ func NewExporter(opts ...Option) *Exporter {
 		res, err := resource.New(context.Background(),
 			resource.WithSchemaURL(semconv.SchemaURL),
 			resource.WithAttributes(
-				semconv.ServiceNameKey.String("Default-Service"),
-				semconv.ServiceVersionKey.String("1.0.0"),
-				semconv.DeploymentEnvironmentKey.String("production"),
+				semconv.ServiceNameKey.String(e.config.ServiceName),
+				semconv.ServiceVersionKey.String(e.config.ServiceVersion),
+				semconv.DeploymentEnvironmentKey.String(e.config.Environment),
 			),
 		)
 		if err != nil {
@@ -80,8 +119,18 @@ func NewExporter(opts ...Option) *Exporter {
 			res = resource.Default()
 		}
 
+		// Create a sampler based on the configured sampling ratio
+		var sampler tracesdk.Sampler
+		if e.config.TraceSamplingRatio >= 1.0 {
+			sampler = tracesdk.AlwaysSample()
+		} else if e.config.TraceSamplingRatio <= 0 {
+			sampler = tracesdk.NeverSample()
+		} else {
+			sampler = tracesdk.TraceIDRatioBased(e.config.TraceSamplingRatio)
+		}
+
 		e.tracerProvider = tracesdk.NewTracerProvider(
-			tracesdk.WithSampler(tracesdk.AlwaysSample()),
+			tracesdk.WithSampler(sampler),
 			tracesdk.WithResource(res),
 		)
 	}
@@ -91,38 +140,64 @@ func NewExporter(opts ...Option) *Exporter {
 		e.meterProvider = metricsdk.NewMeterProvider()
 	}
 
-	return e
+	return e, nil
 }
 
 var (
 	defaultExporter *Exporter
 	once            sync.Once
+	initErr         error
 )
 
-func Default() *Exporter {
+// InitDefault initializes the default exporter with the given options.
+// This should be called early in the application lifecycle.
+func InitDefault(opts ...Option) error {
 	once.Do(func() {
-		defaultExporter = NewExporter()
+		var err error
+		defaultExporter, err = NewExporter(opts...)
+		if err != nil {
+			initErr = err
+		}
 	})
+	return initErr
+}
+
+// Default returns the default exporter. If it hasn't been initialized,
+// it will panic. Use InitDefault to initialize the default exporter.
+func Default() *Exporter {
+	if defaultExporter == nil {
+		panic("default exporter not initialized, call InitDefault first")
+	}
 	return defaultExporter
 }
 
+// Logger returns the configured logger.
 func (e *Exporter) Logger() Logger {
 	return e.logger
 }
 
-func (e *Exporter) Tracer() oteltrace.Tracer {
-	return e.tracerProvider.Tracer("default")
+// Tracer returns a new tracer with the given name.
+func (e *Exporter) Tracer(name string) oteltrace.Tracer {
+	if name == "" {
+		name = e.config.ServiceName
+	}
+	return e.tracerProvider.Tracer(name)
 }
 
-func (e *Exporter) Meter() otelmetric.Meter {
-	return e.meterProvider.Meter("default")
+// Meter returns a new meter with the given name.
+func (e *Exporter) Meter(name string) otelmetric.Meter {
+	if name == "" {
+		name = e.config.ServiceName
+	}
+	return e.meterProvider.Meter(name)
 }
 
+// Shutdown gracefully shuts down the exporter.
 func (e *Exporter) Shutdown(ctx context.Context) error {
 	var errs []error
 
 	if e.tracerProvider != nil {
-		shutdownCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		shutdownCtx, cancel := context.WithTimeout(ctx, e.config.Timeout)
 		defer cancel()
 		if err := e.tracerProvider.Shutdown(shutdownCtx); err != nil {
 			errs = append(errs, fmt.Errorf("tracer provider shutdown failed: %w", err))
@@ -130,7 +205,7 @@ func (e *Exporter) Shutdown(ctx context.Context) error {
 	}
 
 	if e.meterProvider != nil {
-		shutdownCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		shutdownCtx, cancel := context.WithTimeout(ctx, e.config.Timeout)
 		defer cancel()
 		if err := e.meterProvider.Shutdown(shutdownCtx); err != nil {
 			errs = append(errs, fmt.Errorf("meter provider shutdown failed: %w", err))
@@ -139,9 +214,16 @@ func (e *Exporter) Shutdown(ctx context.Context) error {
 
 	if e.logger != nil {
 		if err := e.logger.Sync(); err != nil {
-			errs = append(errs, fmt.Errorf("logger sync failed: %w", err))
+			// Many logger implementations return errors on Sync() even when successful
+			// Use string comparison to be more reliable than errors.Is() with errors.Join
+			if !strings.Contains(err.Error(), "inappropriate ioctl for device") {
+				errs = append(errs, fmt.Errorf("logger sync failed: %w", err))
+			}
 		}
 	}
 
+	if len(errs) == 0 {
+		return nil
+	}
 	return errors.Join(errs...)
 }
