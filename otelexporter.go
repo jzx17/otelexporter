@@ -8,6 +8,9 @@ import (
 	"sync"
 	"time"
 
+	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc"
+	"go.opentelemetry.io/otel/exporters/otlp/otlptrace"
+	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
 	otelmetric "go.opentelemetry.io/otel/metric"
 	metricsdk "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/resource"
@@ -22,6 +25,7 @@ type Config struct {
 	ServiceName        string
 	ServiceVersion     string
 	Environment        string
+	OTLPEndpoint       string // e.g., "localhost:4317"
 	TraceSamplingRatio float64
 	Timeout            time.Duration
 }
@@ -32,6 +36,7 @@ func DefaultConfig() Config {
 		ServiceName:        "default-service",
 		ServiceVersion:     "1.0.0",
 		Environment:        "production",
+		OTLPEndpoint:       "localhost:4317",
 		TraceSamplingRatio: 1.0, // 100% sampling rate
 		Timeout:            5 * time.Second,
 	}
@@ -52,6 +57,8 @@ type Exporter struct {
 	logger         Logger
 	tracerProvider *tracesdk.TracerProvider
 	meterProvider  *metricsdk.MeterProvider
+	traceExporter  *otlptrace.Exporter
+	metricExporter *otlpmetricgrpc.Exporter
 }
 
 // Option defines a function that configures the Exporter.
@@ -86,7 +93,7 @@ func WithConfig(cfg Config) Option {
 }
 
 // NewExporter creates a new OpenTelemetry exporter with the given options.
-func NewExporter(opts ...Option) (*Exporter, error) {
+func NewExporter(ctx context.Context, opts ...Option) (*Exporter, error) {
 	e := &Exporter{
 		config: DefaultConfig(),
 	}
@@ -104,20 +111,42 @@ func NewExporter(opts ...Option) (*Exporter, error) {
 		e.logger = logger
 	}
 
-	// Initialize default tracer provider if not provided
+	if err := e.initializeProviders(ctx); err != nil {
+		return nil, err
+	}
+
+	return e, nil
+}
+
+// initializeProviders sets up the trace and meter providers with appropriate exporters.
+func (e *Exporter) initializeProviders(ctx context.Context) error {
+	// Create a resource describing this service
+	res, err := resource.New(ctx,
+		resource.WithSchemaURL(semconv.SchemaURL),
+		resource.WithAttributes(
+			semconv.ServiceNameKey.String(e.config.ServiceName),
+			semconv.ServiceVersionKey.String(e.config.ServiceVersion),
+			semconv.DeploymentEnvironmentKey.String(e.config.Environment),
+		),
+	)
+	if err != nil {
+		e.logger.Error("failed to create resource", zap.Error(err))
+		res = resource.Default()
+	}
+
+	// Initialize tracer provider if not provided
 	if e.tracerProvider == nil {
-		res, err := resource.New(context.Background(),
-			resource.WithSchemaURL(semconv.SchemaURL),
-			resource.WithAttributes(
-				semconv.ServiceNameKey.String(e.config.ServiceName),
-				semconv.ServiceVersionKey.String(e.config.ServiceVersion),
-				semconv.DeploymentEnvironmentKey.String(e.config.Environment),
-			),
-		)
-		if err != nil {
-			e.logger.Error("failed to create resource", zap.Error(err))
-			res = resource.Default()
+		// Configure how to export the traces
+		traceClientOpts := []otlptracegrpc.Option{
+			otlptracegrpc.WithEndpoint(e.config.OTLPEndpoint),
+			otlptracegrpc.WithTimeout(e.config.Timeout),
 		}
+
+		traceExporter, err := otlptrace.New(ctx, otlptracegrpc.NewClient(traceClientOpts...))
+		if err != nil {
+			return fmt.Errorf("failed to create trace exporter: %w", err)
+		}
+		e.traceExporter = traceExporter
 
 		// Create a sampler based on the configured sampling ratio
 		var sampler tracesdk.Sampler
@@ -129,18 +158,33 @@ func NewExporter(opts ...Option) (*Exporter, error) {
 			sampler = tracesdk.TraceIDRatioBased(e.config.TraceSamplingRatio)
 		}
 
+		// Create the trace provider
 		e.tracerProvider = tracesdk.NewTracerProvider(
 			tracesdk.WithSampler(sampler),
 			tracesdk.WithResource(res),
+			tracesdk.WithBatcher(traceExporter),
 		)
 	}
 
-	// Initialize default meter provider if not provided
+	// Initialize meter provider if not provided
 	if e.meterProvider == nil {
-		e.meterProvider = metricsdk.NewMeterProvider()
+		metricExporter, err := otlpmetricgrpc.New(ctx,
+			otlpmetricgrpc.WithEndpoint(e.config.OTLPEndpoint),
+			otlpmetricgrpc.WithTimeout(e.config.Timeout),
+		)
+		if err != nil {
+			return fmt.Errorf("failed to create metric exporter: %w", err)
+		}
+		e.metricExporter = metricExporter
+
+		// Create the meter provider
+		e.meterProvider = metricsdk.NewMeterProvider(
+			metricsdk.WithResource(res),
+			metricsdk.WithReader(metricsdk.NewPeriodicReader(metricExporter)),
+		)
 	}
 
-	return e, nil
+	return nil
 }
 
 var (
@@ -151,10 +195,10 @@ var (
 
 // InitDefault initializes the default exporter with the given options.
 // This should be called early in the application lifecycle.
-func InitDefault(opts ...Option) error {
+func InitDefault(ctx context.Context, opts ...Option) error {
 	once.Do(func() {
 		var err error
-		defaultExporter, err = NewExporter(opts...)
+		defaultExporter, err = NewExporter(ctx, opts...)
 		if err != nil {
 			initErr = err
 		}
@@ -174,6 +218,16 @@ func Default() *Exporter {
 // Logger returns the configured logger.
 func (e *Exporter) Logger() Logger {
 	return e.logger
+}
+
+// TracerProvider returns the configured tracer provider.
+func (e *Exporter) TracerProvider() oteltrace.TracerProvider {
+	return e.tracerProvider
+}
+
+// MeterProvider returns the configured meter provider.
+func (e *Exporter) MeterProvider() otelmetric.MeterProvider {
+	return e.meterProvider
 }
 
 // Tracer returns a new tracer with the given name.
