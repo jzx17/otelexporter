@@ -3,7 +3,6 @@ package otelexporter_test
 import (
 	"context"
 	"errors"
-	"go.uber.org/zap"
 	"sync"
 	"time"
 
@@ -12,6 +11,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+	"go.uber.org/zap"
 
 	"github.com/jzx17/otelexporter"
 )
@@ -112,14 +112,18 @@ var _ = Describe("Metric Functions", func() {
 		spanExporter   *tracetest.InMemoryExporter
 		testLogger     *testLogger
 		ctx            context.Context
+		cancel         context.CancelFunc
+	)
+
+	// Constants for timeouts
+	const (
+		shortTimeout = 5 * time.Millisecond
+		setupTimeout = 25 * time.Millisecond
 	)
 
 	BeforeEach(func() {
-		// Create a base context with a very short timeout
-		baseCtx := context.Background()
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(baseCtx, 100*time.Millisecond)
-		// Store the cancel function to be called in AfterEach
+		// Create a base context with a shorter timeout (reduced from 100ms to 25ms)
+		ctx, cancel = context.WithTimeout(context.Background(), setupTimeout)
 		DeferCleanup(cancel)
 
 		testLogger = newTestLogger()
@@ -128,16 +132,24 @@ var _ = Describe("Metric Functions", func() {
 			sdktrace.WithSampler(sdktrace.AlwaysSample()),
 			sdktrace.WithBatcher(
 				spanExporter,
-				// Set a very short batching timeout
-				sdktrace.WithBatchTimeout(10*time.Millisecond),
+				// Set a very short batching timeout (reduced from 10ms to 5ms)
+				sdktrace.WithBatchTimeout(shortTimeout),
+				// Add a max export batch size to avoid waiting for batch to fill
+				sdktrace.WithMaxExportBatchSize(1),
 			),
+			// Use synchronous export to avoid network timeouts
+			sdktrace.WithSyncer(spanExporter),
 		)
 
 		// Create a configuration that won't try to connect for long
 		cfg := otelexporter.DefaultConfig()
 		cfg.OTLPEndpoint = "localhost:1" // Use a port that will quickly fail
 		// Set much shorter timeouts
-		cfg.Timeout = 10 * time.Millisecond
+		cfg.Timeout = shortTimeout
+		// Configure batching settings to avoid waiting for batch completion
+		cfg.BatchTimeout = shortTimeout
+		cfg.MaxExportBatchSize = 1
+		cfg.MaxQueueSize = 1
 
 		var err error
 		exporter, err = otelexporter.NewExporter(ctx,
@@ -153,25 +165,25 @@ var _ = Describe("Metric Functions", func() {
 	})
 
 	AfterEach(func() {
-		if exporter != nil {
-			// Create a new context with very short timeout for shutdown
-			shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
-			defer cancel()
-
-			// Ignore errors during shutdown - this is just cleanup
-			_ = exporter.Shutdown(shutdownCtx)
-		}
-
+		// Ensure we always clean up resources
 		if tracerProvider != nil {
 			// Force flush with very short timeout
-			flushCtx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
-			defer cancel()
+			flushCtx, flushCancel := context.WithTimeout(context.Background(), shortTimeout)
 			_ = tracerProvider.ForceFlush(flushCtx)
+			flushCancel()
 
 			// Shutdown tracer provider with very short timeout
-			shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
-			defer cancel()
+			shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), shortTimeout)
 			_ = tracerProvider.Shutdown(shutdownCtx)
+			shutdownCancel()
+		}
+
+		if exporter != nil {
+			// Create a new context with very short timeout for shutdown
+			shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), shortTimeout)
+			// Ignore errors during shutdown - this is just cleanup
+			_ = exporter.Shutdown(shutdownCtx)
+			shutdownCancel()
 		}
 	})
 
@@ -183,7 +195,7 @@ var _ = Describe("Metric Functions", func() {
 			}
 
 			// Use a context with a very short timeout
-			metricCtx, cancel := context.WithTimeout(ctx, 10*time.Millisecond)
+			metricCtx, cancel := context.WithTimeout(ctx, shortTimeout)
 			defer cancel()
 
 			// Record an int64 metric
@@ -200,7 +212,7 @@ var _ = Describe("Metric Functions", func() {
 			}
 
 			// Use a context with a very short timeout
-			metricCtx, cancel := context.WithTimeout(ctx, 10*time.Millisecond)
+			metricCtx, cancel := context.WithTimeout(ctx, shortTimeout)
 			defer cancel()
 
 			// Record a float64 metric
@@ -218,7 +230,7 @@ var _ = Describe("Metric Functions", func() {
 
 			// This test should be very fast since it's just checking type validation
 			// Use a very short timeout
-			metricCtx, cancel := context.WithTimeout(ctx, 5*time.Millisecond)
+			metricCtx, cancel := context.WithTimeout(ctx, shortTimeout)
 			defer cancel()
 
 			// Record with an unsupported type (string)
@@ -236,7 +248,7 @@ var _ = Describe("Metric Functions", func() {
 			}
 
 			// Use a very short timeout for this test
-			spanCtx, cancel := context.WithTimeout(ctx, 10*time.Millisecond)
+			spanCtx, cancel := context.WithTimeout(ctx, shortTimeout)
 			defer cancel()
 
 			ctxWithSpan, span := exporter.StartSpanWithAttributes(spanCtx, "attribute-span",
@@ -253,7 +265,7 @@ var _ = Describe("Metric Functions", func() {
 			span.End()
 
 			// Force flush with very short timeout
-			flushCtx, flushCancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+			flushCtx, flushCancel := context.WithTimeout(context.Background(), shortTimeout)
 			defer flushCancel()
 			err := tracerProvider.ForceFlush(flushCtx)
 			Expect(err).NotTo(HaveOccurred())
@@ -266,7 +278,7 @@ var _ = Describe("Metric Functions", func() {
 			}
 
 			// Use a very short timeout
-			spanCtx, cancel := context.WithTimeout(ctx, 10*time.Millisecond)
+			spanCtx, cancel := context.WithTimeout(ctx, shortTimeout)
 			defer cancel()
 
 			ctxWithSpan, span := exporter.StartSpanWithAttributes(spanCtx, "no-attribute-span",
@@ -280,10 +292,173 @@ var _ = Describe("Metric Functions", func() {
 			span.End()
 
 			// Force flush with very short timeout
-			flushCtx, flushCancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+			flushCtx, flushCancel := context.WithTimeout(context.Background(), shortTimeout)
 			defer flushCancel()
 			err := tracerProvider.ForceFlush(flushCtx)
 			Expect(err).NotTo(HaveOccurred())
+		})
+	})
+
+	// Add tests for new metric functions
+	Describe("RecordHistogram", func() {
+		It("should record int64 histogram", func() {
+			if exporter == nil {
+				Skip("Exporter creation failed in BeforeEach")
+			}
+
+			// Use a context with a very short timeout
+			metricCtx, cancel := context.WithTimeout(ctx, shortTimeout)
+			defer cancel()
+
+			// Record an int64 histogram metric
+			err := exporter.RecordHistogram(metricCtx, "test.int64.histogram", int64(100),
+				attribute.String("key", "value"),
+				attribute.Int("bucket", 1),
+			)
+			Expect(err).NotTo(HaveOccurred())
+		})
+
+		It("should record float64 histogram", func() {
+			if exporter == nil {
+				Skip("Exporter creation failed in BeforeEach")
+			}
+
+			// Use a context with a very short timeout
+			metricCtx, cancel := context.WithTimeout(ctx, shortTimeout)
+			defer cancel()
+
+			// Record a float64 histogram metric
+			err := exporter.RecordHistogram(metricCtx, "test.float64.histogram", float64(75.5),
+				attribute.String("key", "value"),
+				attribute.Int("bucket", 2),
+			)
+			Expect(err).NotTo(HaveOccurred())
+		})
+
+		It("should return error for unsupported types", func() {
+			if exporter == nil {
+				Skip("Exporter creation failed in BeforeEach")
+			}
+
+			// Use a context with a very short timeout
+			metricCtx, cancel := context.WithTimeout(ctx, shortTimeout)
+			defer cancel()
+
+			// Record with an unsupported type (string)
+			err := exporter.RecordHistogram(metricCtx, "test.string.histogram", "unsupported")
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("unsupported histogram value type"))
+		})
+	})
+
+	Describe("RecordDuration", func() {
+		It("should record operation duration", func() {
+			if exporter == nil {
+				Skip("Exporter creation failed in BeforeEach")
+			}
+
+			// Use a context with a very short timeout
+			durationCtx, cancel := context.WithTimeout(ctx, shortTimeout*2)
+			defer cancel()
+
+			// Function that we'll time
+			operationRan := false
+			err := exporter.RecordDuration(durationCtx, "test.operation", func(ctx context.Context) error {
+				operationRan = true
+				// Simulate a short operation
+				time.Sleep(shortTimeout / 2)
+				return nil
+			}, attribute.String("operation", "test"))
+
+			// Verify the operation ran and no error occurred
+			Expect(err).NotTo(HaveOccurred())
+			Expect(operationRan).To(BeTrue())
+		})
+
+		It("should record duration with error", func() {
+			if exporter == nil {
+				Skip("Exporter creation failed in BeforeEach")
+			}
+
+			// Use a context with a very short timeout
+			durationCtx, cancel := context.WithTimeout(ctx, shortTimeout*2)
+			defer cancel()
+
+			// Expected error
+			expectedErr := errors.New("operation failed")
+
+			// Function that returns an error
+			err := exporter.RecordDuration(durationCtx, "test.operation.error", func(ctx context.Context) error {
+				// Simulate a short operation that fails
+				time.Sleep(shortTimeout / 2)
+				return expectedErr
+			}, attribute.String("operation", "test_error"))
+
+			// Verify the error was returned
+			Expect(err).To(Equal(expectedErr))
+		})
+	})
+
+	Describe("RecordCounter", func() {
+		It("should record counter increments", func() {
+			if exporter == nil {
+				Skip("Exporter creation failed in BeforeEach")
+			}
+
+			// Use a context with a very short timeout
+			counterCtx, cancel := context.WithTimeout(ctx, shortTimeout)
+			defer cancel()
+
+			// Record a counter
+			err := exporter.RecordCounter(counterCtx, "test.counter", 1,
+				attribute.String("counter", "increment"),
+			)
+			Expect(err).NotTo(HaveOccurred())
+
+			// Record another increment
+			err = exporter.RecordCounter(counterCtx, "test.counter", 2,
+				attribute.String("counter", "increment"),
+			)
+			Expect(err).NotTo(HaveOccurred())
+		})
+	})
+
+	Describe("RecordGauge", func() {
+		It("should record gauge values", func() {
+			if exporter == nil {
+				Skip("Exporter creation failed in BeforeEach")
+			}
+
+			// Use a context with a very short timeout
+			gaugeCtx, cancel := context.WithTimeout(ctx, shortTimeout)
+			defer cancel()
+
+			// Record an int64 gauge
+			err := exporter.RecordGauge(gaugeCtx, "test.gauge.int", int64(42),
+				attribute.String("gauge_type", "int64"),
+			)
+			Expect(err).NotTo(HaveOccurred())
+
+			// Record a float64 gauge
+			err = exporter.RecordGauge(gaugeCtx, "test.gauge.float", float64(123.45),
+				attribute.String("gauge_type", "float64"),
+			)
+			Expect(err).NotTo(HaveOccurred())
+		})
+
+		It("should return error for unsupported types", func() {
+			if exporter == nil {
+				Skip("Exporter creation failed in BeforeEach")
+			}
+
+			// Use a context with a very short timeout
+			gaugeCtx, cancel := context.WithTimeout(ctx, shortTimeout)
+			defer cancel()
+
+			// Record with an unsupported type (string)
+			err := exporter.RecordGauge(gaugeCtx, "test.gauge.string", "unsupported")
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("unsupported gauge value type"))
 		})
 	})
 })

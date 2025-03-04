@@ -11,6 +11,13 @@ import (
 
 func TestOtelExporter(t *testing.T) {
 	RegisterFailHandler(Fail)
+
+	// Set more restrictive test timeouts to catch hanging tests
+	SetDefaultEventuallyTimeout(50 * time.Millisecond)
+	SetDefaultEventuallyPollingInterval(5 * time.Millisecond)
+	SetDefaultConsistentlyDuration(50 * time.Millisecond)
+	SetDefaultConsistentlyPollingInterval(5 * time.Millisecond)
+
 	RunSpecs(t, "OtelExporter Suite")
 }
 
@@ -22,8 +29,8 @@ func setupShortTimeouts() (cleanup func()) {
 
 	// Override with much shorter timeouts
 	dialer := &net.Dialer{
-		Timeout:   10 * time.Millisecond,
-		KeepAlive: -1, // Disable keep-alive to avoid lingering connections
+		Timeout:   5 * time.Millisecond, // Reduced from 10ms to 5ms
+		KeepAlive: -1,                   // Disable keep-alive to avoid lingering connections
 	}
 	net.DefaultResolver.Dial = dialer.DialContext
 
@@ -37,4 +44,7 @@ var _ = BeforeSuite(func() {
 	// Apply short timeouts for all tests in the suite
 	cleanup := setupShortTimeouts()
 	DeferCleanup(cleanup)
+
+	// Add a short delay to ensure all resources are properly initialized
+	time.Sleep(1 * time.Millisecond)
 })

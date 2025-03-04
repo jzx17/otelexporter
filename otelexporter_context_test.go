@@ -40,8 +40,8 @@ var _ = Describe("Context Provider Functions", func() {
 	)
 
 	BeforeEach(func() {
-		// Create a short-lived context for setup
-		ctx, cancel = context.WithTimeout(context.Background(), 50*time.Millisecond)
+		// Create a short-lived context for setup - reduced from 50ms to 20ms
+		ctx, cancel = context.WithTimeout(context.Background(), 20*time.Millisecond)
 		DeferCleanup(cancel)
 
 		testLogger = newTestContextLogger()
@@ -50,14 +50,17 @@ var _ = Describe("Context Provider Functions", func() {
 			sdktrace.WithSampler(sdktrace.AlwaysSample()),
 			sdktrace.WithBatcher(
 				spanExporter,
-				sdktrace.WithBatchTimeout(10*time.Millisecond),
+				// Reduced from 10ms to 5ms
+				sdktrace.WithBatchTimeout(5*time.Millisecond),
+				// Add a max export batch size to avoid waiting for batch to fill
+				sdktrace.WithMaxExportBatchSize(1),
 			),
 		)
 
-		// Mock configuration that won't attempt real connections
+		// Mock configuration with reduced timeouts
 		cfg := otelexporter.DefaultConfig()
-		cfg.OTLPEndpoint = "localhost:1" // Use localhost with unlikely port to fail faster
-		cfg.Timeout = 10 * time.Millisecond
+		cfg.OTLPEndpoint = "localhost:1"   // Use localhost with unlikely port to fail faster
+		cfg.Timeout = 5 * time.Millisecond // Reduced from 10ms to 5ms
 
 		var err error
 		exporter, err = otelexporter.NewExporter(ctx,
@@ -73,17 +76,17 @@ var _ = Describe("Context Provider Functions", func() {
 
 	AfterEach(func() {
 		if exporter != nil {
-			shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+			shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Millisecond)
 			defer shutdownCancel()
 			_ = exporter.Shutdown(shutdownCtx)
 		}
 
 		if tracerProvider != nil {
-			flushCtx, flushCancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+			flushCtx, flushCancel := context.WithTimeout(context.Background(), 5*time.Millisecond)
 			defer flushCancel()
 			_ = tracerProvider.ForceFlush(flushCtx)
 
-			shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+			shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Millisecond)
 			defer shutdownCancel()
 			_ = tracerProvider.Shutdown(shutdownCtx)
 		}
@@ -95,8 +98,8 @@ var _ = Describe("Context Provider Functions", func() {
 				Skip("Exporter creation failed in BeforeEach")
 			}
 
-			// Create a short-lived context
-			testCtx, testCancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+			// Create a short-lived context - reduced from 10ms to 5ms
+			testCtx, testCancel := context.WithTimeout(context.Background(), 5*time.Millisecond)
 			defer testCancel()
 
 			// Store exporter in context
@@ -114,8 +117,8 @@ var _ = Describe("Context Provider Functions", func() {
 				Skip("Exporter creation failed in BeforeEach")
 			}
 
-			// Create a short-lived context
-			testCtx, testCancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+			// Create a short-lived context - reduced from 10ms to 5ms
+			testCtx, testCancel := context.WithTimeout(context.Background(), 5*time.Millisecond)
 			defer testCancel()
 
 			// Store exporter in context
@@ -131,8 +134,8 @@ var _ = Describe("Context Provider Functions", func() {
 				Skip("Exporter creation failed in BeforeEach")
 			}
 
-			// Create a short-lived context
-			testCtx, testCancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+			// Create a short-lived context - reduced from 10ms to 5ms
+			testCtx, testCancel := context.WithTimeout(context.Background(), 5*time.Millisecond)
 			defer testCancel()
 
 			// Store exporter in context
@@ -150,8 +153,8 @@ var _ = Describe("Context Provider Functions", func() {
 				Skip("Exporter creation failed in BeforeEach")
 			}
 
-			// Create a short-lived context
-			testCtx, testCancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+			// Create a short-lived context - reduced from 10ms to 5ms
+			testCtx, testCancel := context.WithTimeout(context.Background(), 5*time.Millisecond)
 			defer testCancel()
 
 			// Store exporter in context
@@ -164,8 +167,8 @@ var _ = Describe("Context Provider Functions", func() {
 
 			Expect(err).NotTo(HaveOccurred())
 
-			// Force flush spans quickly
-			flushCtx, flushCancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+			// Force flush spans quickly - reduced from 10ms to 5ms
+			flushCtx, flushCancel := context.WithTimeout(context.Background(), 5*time.Millisecond)
 			defer flushCancel()
 			_ = tracerProvider.ForceFlush(flushCtx)
 		})
@@ -175,8 +178,8 @@ var _ = Describe("Context Provider Functions", func() {
 				Skip("Exporter creation failed in BeforeEach")
 			}
 
-			// Create a very short-lived context
-			testCtx, testCancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+			// Create a very short-lived context - reduced from 10ms to 5ms
+			testCtx, testCancel := context.WithTimeout(context.Background(), 5*time.Millisecond)
 			defer testCancel()
 
 			// Create a mock tracer that doesn't trigger network operations
@@ -192,8 +195,8 @@ var _ = Describe("Context Provider Functions", func() {
 			// End the span immediately
 			span.End()
 
-			// Force flush with minimal timeout
-			flushCtx, flushCancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+			// Force flush with minimal timeout - reduced from 10ms to 5ms
+			flushCtx, flushCancel := context.WithTimeout(context.Background(), 5*time.Millisecond)
 			defer flushCancel()
 			err := tracerProvider.ForceFlush(flushCtx)
 			Expect(err).NotTo(HaveOccurred())
@@ -216,8 +219,8 @@ var _ = Describe("Context Provider Functions", func() {
 				Skip("Exporter creation failed in BeforeEach")
 			}
 
-			// Create a short-lived context
-			testCtx, testCancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+			// Create a short-lived context - reduced from 10ms to 5ms
+			testCtx, testCancel := context.WithTimeout(context.Background(), 5*time.Millisecond)
 			defer testCancel()
 
 			// Start a span directly with the tracer provider
@@ -230,8 +233,8 @@ var _ = Describe("Context Provider Functions", func() {
 			// End the span
 			span.End()
 
-			// Force flush
-			flushCtx, flushCancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+			// Force flush - reduced from 10ms to 5ms
+			flushCtx, flushCancel := context.WithTimeout(context.Background(), 5*time.Millisecond)
 			defer flushCancel()
 			_ = tracerProvider.ForceFlush(flushCtx)
 
@@ -256,8 +259,8 @@ var _ = Describe("Context Provider Functions", func() {
 				Skip("Exporter creation failed in BeforeEach")
 			}
 
-			// Create context with very short timeout
-			emptyCtx, emptyCancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+			// Create context with very short timeout - reduced from 10ms to 5ms
+			emptyCtx, emptyCancel := context.WithTimeout(context.Background(), 5*time.Millisecond)
 			defer emptyCancel()
 
 			// Get trace ID from context without span
@@ -274,8 +277,8 @@ var _ = Describe("Context Provider Functions", func() {
 				Skip("Exporter creation failed in BeforeEach")
 			}
 
-			// Create context with very short timeout
-			testCtx, testCancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+			// Create context with very short timeout - reduced from 10ms to 5ms
+			testCtx, testCancel := context.WithTimeout(context.Background(), 5*time.Millisecond)
 			defer testCancel()
 
 			// Context without span
