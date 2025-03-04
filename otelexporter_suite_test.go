@@ -1,6 +1,7 @@
 package otelexporter_test
 
 import (
+	"context"
 	"net"
 	"testing"
 	"time"
@@ -8,6 +9,20 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 )
+
+// mockNetDialer is a test dialer that immediately fails all connections
+type mockNetDialer struct{}
+
+func (d *mockNetDialer) DialContext(ctx context.Context, network, address string) (net.Conn, error) {
+	// Immediately return connection refused error for all attempts
+	return nil, &net.OpError{
+		Op:     "dial",
+		Net:    network,
+		Source: nil,
+		Addr:   nil,
+		Err:    &net.DNSError{Err: "connection refused", Name: address, IsTimeout: false},
+	}
+}
 
 func TestOtelExporter(t *testing.T) {
 	RegisterFailHandler(Fail)
@@ -25,18 +40,15 @@ func TestOtelExporter(t *testing.T) {
 // to prevent long waits when connecting to unreachable endpoints
 func setupShortTimeouts() (cleanup func()) {
 	// Save original settings
-	originalDialContext := net.DefaultResolver.Dial
+	originalDialer := net.DefaultResolver.Dial
 
-	// Override with much shorter timeouts
-	dialer := &net.Dialer{
-		Timeout:   5 * time.Millisecond, // Reduced from 10ms to 5ms
-		KeepAlive: -1,                   // Disable keep-alive to avoid lingering connections
-	}
-	net.DefaultResolver.Dial = dialer.DialContext
+	// Override with our mock dialer that fails immediately
+	mockDialer := &mockNetDialer{}
+	net.DefaultResolver.Dial = mockDialer.DialContext
 
 	// Return a cleanup function to restore the original settings
 	return func() {
-		net.DefaultResolver.Dial = originalDialContext
+		net.DefaultResolver.Dial = originalDialer
 	}
 }
 
