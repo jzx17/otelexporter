@@ -269,6 +269,128 @@ exporter, _ := otelexporter.NewExporter(ctx,
 // Later check the captured spans
 spans := spanExporter.GetSpans()
 ```
+# HTTP Instrumentation
+
+The `otelexporter` package provides built-in HTTP instrumentation capabilities for both servers and clients.
+
+## HTTP Server Middleware
+
+The package includes middleware for HTTP servers that automatically:
+
+- Captures request metrics including request count and duration
+- Creates and manages trace spans for each HTTP request
+- Adds HTTP request attributes to spans (method, path, user-agent, etc.)
+- Marks 5xx responses as errors
+- Handles trace context propagation from incoming requests
+
+Example usage:
+
+```go
+import (
+    "net/http"
+    "github.com/jzx17/otelexporter"
+)
+
+func setupServer() {
+    // Initialize the exporter
+    exporter, err := otelexporter.NewExporter(context.Background())
+    if err != nil {
+        log.Fatalf("Failed to create exporter: %v", err)
+    }
+
+    // Create your handler
+    handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        // The request context already contains the active span
+        // You can create child spans if needed:
+        ctx, span := otelexporter.TracerFromContext(r.Context(), "").Start(r.Context(), "handler-operation")
+        defer span.End()
+
+        // Handle the request...
+        w.Write([]byte("Hello, world!"))
+    })
+
+    // Wrap the handler with the middleware
+    wrappedHandler := exporter.HTTPMiddleware("my-service")(handler)
+
+    // Start the server with the wrapped handler
+    http.ListenAndServe(":8080", wrappedHandler)
+}
+```
+
+## HTTP Client Instrumentation
+
+The package also provides instrumentation for HTTP clients:
+
+- Automatically traces outgoing HTTP requests
+- Injects trace context into outgoing request headers
+- Captures HTTP client metrics
+- Marks errors and 5xx responses with error status
+
+Example usage:
+
+```go
+import (
+    "net/http"
+    "github.com/jzx17/otelexporter"
+)
+
+func makeRequest(ctx context.Context, exporter *otelexporter.Exporter) error {
+    // Create or wrap an HTTP client
+    client := exporter.WrapHTTPClient(http.DefaultClient, "my-client")
+
+    // Create a request with the current context
+    req, err := http.NewRequestWithContext(ctx, "GET", "https://example.com", nil)
+    if err != nil {
+        return err
+    }
+
+    // Make the request - it will be automatically traced
+    resp, err := client.Do(req)
+    if err != nil {
+        return err
+    }
+    defer resp.Body.Close()
+
+    // Process the response...
+    return nil
+}
+```
+
+## Context Propagation
+
+The HTTP instrumentation automatically handles trace context propagation:
+
+- For servers, it extracts context from incoming request headers
+- For clients, it injects context into outgoing request headers
+
+The default propagator uses W3C Trace Context, but you can configure a custom propagator:
+
+```go
+import (
+    "go.opentelemetry.io/otel/propagation"
+    "github.com/jzx17/otelexporter"
+)
+
+func configureExporter() {
+    // Create a custom propagator
+    propagator := propagation.NewCompositeTextMapPropagator(
+        propagation.TraceContext{},
+        propagation.Baggage{},
+    )
+
+    // Create an exporter with the custom propagator
+    exporter, err := otelexporter.NewExporter(
+        context.Background(),
+        otelexporter.WithPropagator(propagator),
+    )
+    if err != nil {
+        log.Fatalf("Failed to create exporter: %v", err)
+    }
+
+    // Use the exporter...
+}
+```
+
 
 ## License
 

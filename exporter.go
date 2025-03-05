@@ -1,3 +1,4 @@
+// exporter.go - Add propagator field to Exporter struct
 package otelexporter
 
 import (
@@ -7,6 +8,7 @@ import (
 	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace"
 	otelmetric "go.opentelemetry.io/otel/metric"
+	"go.opentelemetry.io/otel/propagation"
 	metricsdk "go.opentelemetry.io/otel/sdk/metric"
 	tracesdk "go.opentelemetry.io/otel/sdk/trace"
 	oteltrace "go.opentelemetry.io/otel/trace"
@@ -30,6 +32,7 @@ type Exporter struct {
 	meterProvider  *metricsdk.MeterProvider
 	traceExporter  *otlptrace.Exporter
 	metricExporter *otlpmetricgrpc.Exporter
+	propagator     propagation.TextMapPropagator // Added propagator field
 }
 
 // Option defines a function that configures the Exporter.
@@ -63,10 +66,22 @@ func WithConfig(cfg Config) Option {
 	}
 }
 
+// WithPropagator sets a custom propagator for the Exporter.
+func WithPropagator(p propagation.TextMapPropagator) Option {
+	return func(e *Exporter) {
+		e.propagator = p
+	}
+}
+
 // NewExporter creates a new OpenTelemetry exporter with the given options.
 func NewExporter(ctx context.Context, opts ...Option) (*Exporter, error) {
 	e := &Exporter{
 		config: DefaultConfig(),
+		// Default to W3C trace context and baggage propagation
+		propagator: propagation.NewCompositeTextMapPropagator(
+			propagation.TraceContext{},
+			propagation.Baggage{},
+		),
 	}
 
 	// Apply options
@@ -94,8 +109,14 @@ func NewExporter(ctx context.Context, opts ...Option) (*Exporter, error) {
 	// Set global providers for convenience
 	otel.SetTracerProvider(e.tracerProvider)
 	otel.SetMeterProvider(e.meterProvider)
+	otel.SetTextMapPropagator(e.propagator) // Set global propagator
 
 	return e, nil
+}
+
+// Propagator returns the configured context propagator.
+func (e *Exporter) Propagator() propagation.TextMapPropagator {
+	return e.propagator
 }
 
 // Tracer returns a new tracer with the given name.
